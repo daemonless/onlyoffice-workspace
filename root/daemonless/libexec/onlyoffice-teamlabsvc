@@ -1,0 +1,9 @@
+#!/bin/sh
+export MONO_IOMAP="all"
+export MONO_PATH="/var/www/onlyoffice/Services/TeamLabSvc/"
+rm -f /tmp/onlyofficeTeamLabSvc
+cd /var/www/onlyoffice/Services/TeamLabSvc || exit 1
+exec dsu bsd /usr/local/bin/mono-service --no-daemon \
+    -d:/var/www/onlyoffice/Services/TeamLabSvc \
+    -l:/tmp/onlyofficeTeamLabSvc \
+    /var/www/onlyoffice/Services/TeamLabSvc/TeamLabSvc.exe

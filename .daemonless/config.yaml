@@ -1,0 +1,24 @@
+# dbuild configuration file
+# Full reference: https://github.com/daemonless/dbuild
+
+icon: ':simple-onlyoffice:'
+
+build:
+  architectures:
+    - amd64
+  variants:
+    - tag: latest
+      containerfile: Containerfile
+      default: true
+      tag_desc: "Built from the official upstream ONLYOFFICE Community Server and Control Panel releases with FreeBSD-native HyperFastCGI."
+
+cit:
+  compose: true
+  mode: screenshot
+  port: 8080
+  wait: 240
+  health: /api/2.0/capabilities.json
+  ready: "Portal ready on port"
+  screenshot_wait: 10
+  annotations:
+    org.freebsd.jail.allow.mlock: "true"

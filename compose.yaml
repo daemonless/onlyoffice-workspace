@@ -1,0 +1,267 @@
+name: onlyoffice-workspace
+
+x-daemonless:
+  title: "ONLYOFFICE Workspace"
+  icon: ":simple-onlyoffice:"
+  category: "Productivity"
+  description: "Self-hosted collaborative office workspace combining Documents, Projects, CRM, Mail, Calendar, People, Control Panel, and real-time ONLYOFFICE Document Server editors."
+  upstream_url: "https://github.com/ONLYOFFICE/CommunityServer"
+  web_url: "https://www.onlyoffice.com/workspace.aspx"
+  freshports_url: ""
+  user: "bsd"
+  mlock: true
+  upstream_binary: false
+  community: "Discord:https://discord.gg/Kb9tkhecZT"
+  # The workspace portal is the one people open (and proxies /ds-vpath/ and
+  # /controlpanel/ internally); document server, mariadb and postgres stay on
+  # the stack's private network.
+  networking:
+    onlyoffice-workspace: default
+    "*": private
+  hostnames:
+    mariadb: MARIADB_HOSTNAME
+    postgres: POSTGRES_HOSTNAME
+    onlyoffice-documentserver: DOCUMENT_SERVER_HOSTNAME
+
+  choices:
+    database:
+      label: Database
+      doc: Where ONLYOFFICE Workspace keeps its portal data. The default runs its own MariaDB.
+      default: builtin
+      options:
+        builtin:
+          label: Built-in MariaDB
+          doc: A MariaDB of its own, on the stack's private network.
+        external:
+          label: Your own MariaDB
+          doc: A MariaDB you already run. Create the database and a user with all privileges on it first, and set sql_mode=NO_ENGINE_SUBSTITUTION and max_allowed_packet=1G on that server.
+          drop: [mariadb]
+          ask:
+            - name: MARIADB_HOSTNAME
+              label: Host
+            - name: MARIADB_PORT
+              label: Port
+              default: "3306"
+            - name: MARIADB_DATABASE
+              label: Database name
+              default: onlyoffice
+            - name: MARIADB_USER
+              label: User
+              default: onlyoffice
+            - name: DB_PASSWORD
+              label: Password
+              type: secret
+    document_server:
+      label: Document editors
+      doc: Online collaborative editors for Word, Excel and PowerPoint files inside Documents.
+      default: "on"
+      options:
+        "on":
+          label: "With Document Server (Workspace)"
+          doc: Runs ONLYOFFICE Document Server and its PostgreSQL alongside the portal.
+        "off":
+          label: "Portal only (Groups)"
+          doc: Projects, CRM, Mail, People and Calendar without the online document editors.
+          drop: [onlyoffice-documentserver, postgres]
+          env: { DOCUMENT_SERVER_HOSTNAME: "" }
+
+  appjail:
+    director:
+      options:
+        - alias:
+        - ip4_inherit:
+    depends_on:
+      - name: mariadb
+        image: ghcr.io/daemonless/mariadb:latest
+        env:
+          PUID: "1000"
+          PGID: "1000"
+          TZ: "!ENV '${TZ}'"
+          MYSQL_ROOT_PASSWORD: "!ENV '${DB_ROOT_PASSWORD}'"
+          MYSQL_DATABASE: onlyoffice
+          MYSQL_USER: onlyoffice
+          MYSQL_PASSWORD: "!ENV '${DB_PASSWORD}'"
+        volumes:
+          mariadb_data: /config
+      - name: postgres
+        image: ghcr.io/daemonless/postgres:16
+        template: postgres-template.conf
+        env:
+          POSTGRES_DB: onlyoffice
+          POSTGRES_USER: onlyoffice
+          POSTGRES_PASSWORD: "!ENV '${DB_PASSWORD}'"
+          POSTGRES_HOST_AUTH_METHOD: trust
+        volumes:
+          postgres_data: /var/lib/postgresql/data
+      - name: onlyoffice-documentserver
+        image: ghcr.io/daemonless/onlyoffice:pkg
+        env:
+          DB_HOST: "!ENV '${POSTGRES_HOSTNAME:-127.0.0.1}'"
+          DB_PORT: "5432"
+          DB_NAME: onlyoffice
+          DB_USER: onlyoffice
+          DB_PWD: "!ENV '${DB_PASSWORD}'"
+          HTTP_PORT: "8083"
+          JWT_ENABLED: "true"
+          JWT_SECRET: "!ENV '${JWT_SECRET}'"
+          JWT_HEADER: AuthorizationJwt
+          TZ: "!ENV '${TZ}'"
+        volumes:
+          docserver_data: /config
+
+  docs:
+    services:
+      onlyoffice-workspace: "Portal web UI, API, Control Panel, and internal Redis cache"
+      onlyoffice-documentserver: "Online collaborative editors for documents, spreadsheets, and presentations"
+      mariadb: "Portal database (users, projects, CRM, calendar, and metadata)"
+      postgres: "Document Server database for real-time collaborative editing state"
+    env:
+      PUID: "User ID for the application process"
+      PGID: "Group ID for the application process"
+      TZ:
+        desc: "Timezone for the containers"
+        optional: true
+      WORKSPACE_DATA_LOCATION: "Path to store ONLYOFFICE Workspace portal data, uploads, and logs"
+      DOCSERVER_DATA_LOCATION: "Path to store Document Server cache and data"
+      MARIADB_DATA_LOCATION: "Path to store MariaDB database files"
+      POSTGRES_DATA_LOCATION: "Path to store PostgreSQL database files"
+      DB_PASSWORD: "Database password for MariaDB and PostgreSQL"
+      DB_ROOT_PASSWORD: "MariaDB root password (built-in MariaDB only)"
+      JWT_SECRET:
+        desc: "Shared JWT secret between Workspace and Document Server"
+        level: advanced
+      CORE_MACHINEKEY:
+        desc: "Portal encryption and token signing key (generated and persisted on first start if unset)"
+        level: advanced
+        optional: true
+      MARIADB_HOSTNAME:
+        desc: "Where the portal finds MariaDB (fjord sets this for the built-in one; 127.0.0.1 on host networking)"
+        level: advanced
+        optional: true
+      MARIADB_PORT:
+        desc: "MariaDB port (your own MariaDB)"
+        level: advanced
+        optional: true
+      MARIADB_DATABASE:
+        desc: "Database name (your own MariaDB)"
+        level: advanced
+        optional: true
+      MARIADB_USER:
+        desc: "Database user (your own MariaDB)"
+        level: advanced
+        optional: true
+      POSTGRES_HOSTNAME:
+        desc: "Where Document Server finds PostgreSQL (fjord sets this; 127.0.0.1 on host networking)"
+        level: advanced
+        optional: true
+      DOCUMENT_SERVER_HOSTNAME:
+        desc: "Where the portal finds Document Server (127.0.0.1 on host networking; empty disables online editors)"
+        level: advanced
+        optional: true
+      HTTP_PORT: "HTTP listen port for the Workspace portal (default: 8080)"
+      MYSQL_SERVER_HOST: "MariaDB server hostname"
+      MYSQL_SERVER_PORT: "MariaDB server port (default: 3306)"
+      MYSQL_SERVER_DB_NAME: "MariaDB database name (default: onlyoffice)"
+      MYSQL_SERVER_USER: "MariaDB username (default: onlyoffice)"
+      MYSQL_SERVER_PASS: "MariaDB password"
+      MYSQL_SERVER_ROOT_PASS:
+        desc: "MariaDB root password for applying global sql_mode and max_allowed_packet settings at startup"
+        level: advanced
+        optional: true
+      DOCUMENT_SERVER_HOST: "Document Server hostname"
+      DOCUMENT_SERVER_PORT: "Document Server HTTP port (default: 8083)"
+      JWT_ENABLED: "Enable JWT validation with Document Server (default: true)"
+      JWT_HEADER: "JWT HTTP header name (default: AuthorizationJwt)"
+    volumes:
+      /config: "Persistent portal data, uploads, certificates, and logs"
+    ports:
+      8080: "Web UI (ONLYOFFICE Workspace portal, Control Panel at /controlpanel/, and proxied Document Server at /ds-vpath/)"
+
+  readme:
+    introduction: |-
+      This is the full **ONLYOFFICE Workspace** portal (users, Documents, Projects, CRM, Calendar, People, and Control Panel), with Document Server included by default. If you already run Nextcloud, Seafile, or OwnCloud and only want the standalone document editors to connect to it, see **[ONLYOFFICE Document Server](https://daemonless.io/images/onlyoffice/)** (`daemonless/onlyoffice`) instead.
+    setup: |-
+      **Modules not included.** External CalDAV/CardDAV sync (Radicale) is not included; the built-in Calendar and People modules work without it. The Mail module (external IMAP/SMTP aggregation) is not included yet.
+
+services:
+  onlyoffice-workspace:
+    image: ghcr.io/daemonless/onlyoffice-workspace:${ONLYOFFICE_WORKSPACE_TAG:-latest}
+    container_name: onlyoffice-workspace
+    network_mode: host
+    restart: unless-stopped
+    annotations:
+      org.freebsd.jail.allow.mlock: "true"
+    depends_on:
+      - mariadb
+      - onlyoffice-documentserver
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:-UTC}
+      - HTTP_PORT=8080
+      - MYSQL_SERVER_HOST=${MARIADB_HOSTNAME:-127.0.0.1}
+      - MYSQL_SERVER_PORT=${MARIADB_PORT:-3306}
+      - MYSQL_SERVER_DB_NAME=${MARIADB_DATABASE:-onlyoffice}
+      - MYSQL_SERVER_USER=${MARIADB_USER:-onlyoffice}
+      - MYSQL_SERVER_PASS=${DB_PASSWORD}
+      - MYSQL_SERVER_ROOT_PASS=${DB_ROOT_PASSWORD:-}
+      - DOCUMENT_SERVER_HOST=${DOCUMENT_SERVER_HOSTNAME-127.0.0.1}
+      - DOCUMENT_SERVER_PORT=8083
+      - JWT_ENABLED=true
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_HEADER=AuthorizationJwt
+      - CORE_MACHINEKEY=${CORE_MACHINEKEY:-}
+    volumes:
+      - ${WORKSPACE_DATA_LOCATION}:/config
+
+  onlyoffice-documentserver:
+    image: ghcr.io/daemonless/onlyoffice:pkg
+    container_name: onlyoffice-documentserver
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      - DB_HOST=${POSTGRES_HOSTNAME:-127.0.0.1}
+      - DB_PORT=5432
+      - DB_NAME=onlyoffice
+      - DB_USER=onlyoffice
+      - DB_PWD=${DB_PASSWORD}
+      - HTTP_PORT=8083
+      - JWT_ENABLED=true
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_HEADER=AuthorizationJwt
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${DOCSERVER_DATA_LOCATION}:/config
+
+  mariadb:
+    image: ghcr.io/daemonless/mariadb:latest
+    container_name: onlyoffice-mariadb
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:-UTC}
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=onlyoffice
+      - MYSQL_USER=onlyoffice
+      - MYSQL_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - ${MARIADB_DATA_LOCATION}:/config
+
+  postgres:
+    image: ghcr.io/daemonless/postgres:16
+    container_name: onlyoffice-postgres
+    network_mode: host
+    restart: unless-stopped
+    annotations:
+      org.freebsd.jail.allow.sysvipc: "true"
+    environment:
+      - POSTGRES_DB=onlyoffice
+      - POSTGRES_USER=onlyoffice
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    volumes:
+      - ${POSTGRES_DATA_LOCATION}:/var/lib/postgresql/data

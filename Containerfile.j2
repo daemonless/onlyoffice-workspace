@@ -1,0 +1,161 @@
+ARG BASE_VERSION=15
+
+# ==============================================================================
+# Stage 1: Builder (HyperFastCGI native library + ONLYOFFICE payload staging)
+# ==============================================================================
+FROM ghcr.io/daemonless/base:${BASE_VERSION} AS builder
+
+# Upstream package versions and SHA256s come from ONLYOFFICE's APT index and Docker-CommunityServer:
+#   https://download.onlyoffice.com/repo/debian/dists/squeeze/main/binary-amd64/Packages
+#   https://github.com/ONLYOFFICE/Docker-CommunityServer/blob/master/Dockerfile
+ARG COMMUNITY_SERVER_VERSION="12.8.0.1971"
+ARG COMMUNITY_SERVER_SHA256="a1f25eb0b6b73a79c0dc20c4cdd19479ee2451e30435a42ef9fb5326cb8a51cc"
+ARG CONTROL_PANEL_VERSION="3.5.5.549"
+ARG CONTROL_PANEL_SHA256="6ca1cef1e46877a321afb1397d980666a6c4cfee7495d28a70c3045fde8a0c2d"
+ARG XMPP_SERVER_VERSION="12.0.0.134"
+ARG XMPP_SERVER_SHA256="a9795bab4dc79dd9a5b1319ab5aa231ab9fcf2e9a70770653b209249eb9c868e"
+ARG HYPERFASTCGI_DEB_VERSION="0.4-8"
+ARG HYPERFASTCGI_DEB_SHA256="1180d1be478b7e6b96e0fce9319df854f98535073c902a38969ba29e5214be4e"
+ARG HYPERFASTCGI_COMMIT="9f7f2ea886c7a686fae45969c8ced381b6d59c80"
+ARG HYPERFASTCGI_SHA256="b1c1ddee2bba8458f88018dff3dad6688b5fcde2651c7ee7c94252f0401839f2"
+
+RUN pkg update && \
+    pkg install -y \
+        FreeBSD-clang \
+        FreeBSD-clibs-dev \
+        mono6.8 \
+        glib \
+        libevent \
+        pkgconf \
+        node20 && \
+    pkg clean -ay && \
+    rm -rf /var/cache/pkg/* /var/db/pkg/repos/*
+
+# Build FreeBSD-native libhfc-native.so.1.0.0 from ONLYOFFICE/HyperFastCGI
+RUN mkdir -p /tmp/hfc /stage/usr/local/lib/mono/gac && \
+    fetch -qo /tmp/hfc.tar.gz \
+        "https://github.com/ONLYOFFICE/HyperFastCGI/archive/${HYPERFASTCGI_COMMIT}.tar.gz" && \
+    sha256 -c "${HYPERFASTCGI_SHA256}" /tmp/hfc.tar.gz && \
+    tar -xzf /tmp/hfc.tar.gz -C /tmp/hfc --strip-components=1 && \
+    cd /tmp/hfc/src/libnative && \
+    cc -shared -fPIC -O2 -o /stage/usr/local/lib/libhfc-native.so.1.0.0 \
+        $(pkg-config --cflags glib-2.0 libevent libevent_pthreads mono-2) \
+        libev.c fcgi.c fcgi-transport.c socket-helper.c mono-bridge.c \
+        mono-bridge-def.c host-list.c domain-bridge.c \
+        $(pkg-config --libs glib-2.0 libevent libevent_pthreads mono-2) && \
+    ln -sf libhfc-native.so.1.0.0 /stage/usr/local/lib/libhfc-native.so.1 && \
+    ln -sf libhfc-native.so.1.0.0 /stage/usr/local/lib/libhfc-native.so && \
+    rm -rf /tmp/hfc /tmp/hfc.tar.gz
+
+# Fetch and stage architecture-independent ONLYOFFICE Workspace packages
+RUN mkdir -p /tmp/debs /stage && \
+    cd /tmp/debs && \
+    fetch -qo hfc.deb \
+        "https://d2nlctn12v279m.cloudfront.net/repo/mono/ubuntu/pool/main/m/mono-webserver-hyperfastcgi/mono-webserver-hyperfastcgi_${HYPERFASTCGI_DEB_VERSION}_all.deb" && \
+    sha256 -c "${HYPERFASTCGI_DEB_SHA256}" hfc.deb && \
+    fetch -qo cs.deb \
+        "https://download.onlyoffice.com/repo/debian/pool/main/o/onlyoffice-communityserver/onlyoffice-communityserver_${COMMUNITY_SERVER_VERSION}_all.deb" && \
+    sha256 -c "${COMMUNITY_SERVER_SHA256}" cs.deb && \
+    fetch -qo cp.deb \
+        "https://download.onlyoffice.com/repo/debian/pool/main/o/onlyoffice-controlpanel/onlyoffice-controlpanel_${CONTROL_PANEL_VERSION}_all.deb" && \
+    sha256 -c "${CONTROL_PANEL_SHA256}" cp.deb && \
+    fetch -qo xmpp.deb \
+        "https://download.onlyoffice.com/repo/debian/pool/main/o/onlyoffice-xmppserver/onlyoffice-xmppserver_${XMPP_SERVER_VERSION}_all.deb" && \
+    sha256 -c "${XMPP_SERVER_SHA256}" xmpp.deb && \
+    for deb in hfc.deb cs.deb cp.deb xmpp.deb; do \
+        mkdir /tmp/debs/ext && \
+        cd /tmp/debs/ext && \
+        tar -xf "../${deb}" && \
+        tar -xf data.tar.* -C /stage && \
+        cd /tmp/debs && \
+        rm -rf /tmp/debs/ext "${deb}"; \
+    done && \
+    mv /stage/usr/lib/hyperfastcgi /stage/usr/local/lib/ && \
+    mv /stage/usr/lib/mono/gac/HyperFastCgi /stage/usr/local/lib/mono/gac/ && \
+    rm -rf /tmp/debs /stage/usr/lib /stage/usr/bin /stage/usr/share /stage/lib /stage/etc/god \
+        /stage/var/www/onlyoffice/Services/MailAggregator \
+        /stage/var/www/onlyoffice/Services/MailCleaner \
+        /stage/var/www/onlyoffice/Services/MailImap \
+        /stage/var/www/onlyoffice/Services/MailWatchdog && \
+    find /stage/var/www/onlyoffice/Services -name 'libSystem.IO.Ports.Native.so' -delete && \
+    mkdir -p /var/log/onlyoffice && \
+    cd /stage/var/www/onlyoffice/controlpanel/www && \
+    # Pre-generate the Control Panel JS bundle and verify its Node modules load on FreeBSD at build time.
+    NODE_ENV=production /usr/local/bin/node -e "require('./app'); setTimeout(() => process.exit(0), 2000);" && \
+    chmod -R a+rX /stage
+
+# ==============================================================================
+# Stage 2: Runtime
+# ==============================================================================
+FROM ghcr.io/daemonless/nginx-base:${BASE_VERSION}
+
+ARG FREEBSD_ARCH=amd64
+ARG COMMUNITY_SERVER_VERSION="12.8.0.1971"
+ARG PACKAGES="mono6.8 glib libevent mariadb114-client redis node20 jq bash"
+ARG UPSTREAM_URL="https://api.github.com/repos/ONLYOFFICE/CommunityServer/tags"
+ARG UPSTREAM_JQ='.[0].name | ltrimstr("v")'
+{%- if ports %}
+ARG HEALTHCHECK_ENDPOINT="http://localhost:{{ ports[0].port }}/api/2.0/capabilities.json"
+{%- else %}
+ARG HEALTHCHECK_ENDPOINT="http://localhost:8080/api/2.0/capabilities.json"
+{%- endif %}
+
+ENV HEALTHCHECK_URL="${HEALTHCHECK_ENDPOINT}"
+
+# --- Metadata (Injected by Generator) ---
+LABEL org.opencontainers.image.title="{{ title }}" \
+      org.opencontainers.image.description="{{ description }}" \
+      org.opencontainers.image.source="{{ repo_url }}" \
+      org.opencontainers.image.url="{{ web_url }}" \
+      org.opencontainers.image.documentation="https://helpcenter.onlyoffice.com/workspace/" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="daemonless" \
+      org.opencontainers.image.authors="daemonless" \
+      io.daemonless.category="{{ category }}" \
+{%- if ports %}
+      io.daemonless.port="{{ ports[0].port }}" \
+{%- endif %}
+{%- if volumes %}
+      io.daemonless.volumes="{{ volumes | map(attribute='path') | join(',') }}" \
+{%- endif %}
+{%- if mlock %}
+      org.freebsd.jail.allow.mlock="required" \
+{%- endif %}
+      io.daemonless.arch="${FREEBSD_ARCH}" \
+      io.daemonless.upstream-url="${UPSTREAM_URL}" \
+      io.daemonless.upstream-jq="${UPSTREAM_JQ}" \
+      io.daemonless.healthcheck-url="${HEALTHCHECK_ENDPOINT}" \
+      io.daemonless.packages="${PACKAGES}"
+
+RUN pkg update && \
+    pkg install -y ${PACKAGES} && \
+    mkdir -p /app /config && \
+    printf "%s\n" "${COMMUNITY_SERVER_VERSION}" > /app/version && \
+    cert-sync /usr/local/share/certs/ca-root-nss.crt && \
+    pkg clean -ay && \
+    rm -rf /var/cache/pkg/* /var/db/pkg/repos/* && \
+    find /usr/local -name '*.a' -delete && \
+    rm -rf /usr/local/share/doc /usr/local/share/man /usr/local/include && \
+    rm -rf /usr/local/libexec/gcc* /usr/local/bin/*-portbld-freebsd* /usr/local/*-portbld-freebsd* && \
+    rm -f /usr/local/bin/gcc* /usr/local/bin/g++* /usr/local/bin/gfortran* /usr/local/bin/cpp* /usr/local/bin/c++* && \
+    rm -f /usr/local/lib/libopcodes* /usr/local/lib/libbfd* && \
+    chown -R bsd:bsd /config
+
+COPY --from=builder /stage/ /
+
+RUN mkdir -p /etc/nginx/sites-enabled /etc/nginx/conf.d && \
+    ln -sf /usr/local/etc/nginx/mime.types /etc/nginx/mime.types && \
+    ln -sf /usr/local/etc/nginx/fastcgi_params /etc/nginx/fastcgi_params
+
+COPY root/ /
+RUN chmod +x /daemonless/init.d/* /daemonless/libexec/* /healthz
+
+# --- Expose (Injected by Generator) ---
+{%- if ports %}
+EXPOSE {{ ports | map(attribute='port') | join(' ') }}
+{%- endif %}
+
+# --- Volumes (Injected by Generator) ---
+{%- if volumes %}
+VOLUME {{ volumes | map(attribute='path') | join(' ') }}
+{%- endif %}
