@@ -1,0 +1,4 @@
+#!/bin/sh
+export NODE_OPTIONS="--dns-result-order=ipv4first"
+cd /var/www/onlyoffice/Services/ASC.WebDav/server || exit 1
+exec dsu bsd /usr/local/bin/node /var/www/onlyoffice/Services/ASC.WebDav/server/webDavServer.js UNIX.SERVER

@@ -1,0 +1,16 @@
+#!/bin/sh
+export LD_LIBRARY_PATH="/usr/local/lib"
+export MONO_PATH="/var/www/onlyoffice/ApiSystem/bin/"
+export MONO_IOMAP="all"
+export MONO_ASPNET_WEBCONFIG_CACHESIZE="2000"
+export MONO_THREADS_PER_CPU="2000"
+export MONO_GC_PARAMS="nursery-size=128m,soft-heap-limit=512m,bridge-implementation=tarjan"
+export MONO_LOG_LEVEL="error"
+export MONO_THREADS_SUSPEND="preemptive"
+
+rm -f /var/run/onlyoffice/onlyofficeApiSystem.socket
+
+exec dsu bsd /usr/local/bin/mono /usr/local/lib/hyperfastcgi/4.0/HyperFastCgi.exe \
+    /config=/etc/hyperfastcgi/onlyofficeApiSystem \
+    /logfile=/var/log/onlyoffice/onlyofficeApiSystem.log \
+    /loglevels=Error

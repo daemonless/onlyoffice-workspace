@@ -1,0 +1,224 @@
+#!/bin/sh
+# ONLYOFFICE Workspace (Community Server + Control Panel) init script
+
+APP_DIR="/var/www/onlyoffice"
+WEBSTUDIO_DIR="${APP_DIR}/WebStudio"
+APISYSTEM_DIR="${APP_DIR}/ApiSystem"
+SERVICES_DIR="${APP_DIR}/Services"
+CONTROLPANEL_DIR="${APP_DIR}/controlpanel/www"
+CONFIG_DIR="/etc/onlyoffice/communityserver"
+NGINX_CONF="/usr/local/etc/nginx/nginx.conf"
+
+HTTP_PORT="${HTTP_PORT:-8080}"
+MYSQL_SERVER_HOST="${MYSQL_SERVER_HOST:-127.0.0.1}"
+MYSQL_SERVER_PORT="${MYSQL_SERVER_PORT:-3306}"
+MYSQL_SERVER_DB_NAME="${MYSQL_SERVER_DB_NAME:-onlyoffice}"
+MYSQL_SERVER_USER="${MYSQL_SERVER_USER:-onlyoffice}"
+if [ -z "${MYSQL_SERVER_PASS:-}" ]; then
+    echo "[onlyoffice-workspace] ERROR: MYSQL_SERVER_PASS is required and cannot be empty." >&2
+    exit 1
+fi
+REDIS_SERVER_HOST="${REDIS_SERVER_HOST:-127.0.0.1}"
+REDIS_SERVER_PORT="${REDIS_SERVER_PORT:-6379}"
+DOCUMENT_SERVER_HOST="${DOCUMENT_SERVER_HOST:-}"
+DOCUMENT_SERVER_PORT="${DOCUMENT_SERVER_PORT:-8080}"
+DOCUMENT_SERVER_PROTOCOL="${DOCUMENT_SERVER_PROTOCOL:-http}"
+JWT_ENABLED="${JWT_ENABLED:-true}"
+JWT_HEADER="${JWT_HEADER:-AuthorizationJwt}"
+
+# --- 1. Persistent directories under /config ---
+mkdir -p \
+    /config/data/.private \
+    /config/data/certs \
+    /config/documentserver-data \
+    /config/logs \
+    /var/run/onlyoffice \
+    /var/cache/nginx/onlyoffice \
+    /var/cache/nginx/tmp \
+    /etc/mono/registry/LocalMachine \
+    /usr/share/.mono/keypairs \
+    "${APP_DIR}/.config/.mono/keypairs"
+
+rm -rf "${APP_DIR}/Data" "${APP_DIR}/DocumentServerData" /var/log/onlyoffice
+ln -sfn /config/data "${APP_DIR}/Data"
+ln -sfn /config/documentserver-data "${APP_DIR}/DocumentServerData"
+ln -sfn /config/logs /var/log/onlyoffice
+
+rm -f /var/run/onlyoffice/*.socket /tmp/onlyoffice*
+
+# --- 2. Machine key & JWT secret persistence ---
+if [ -f /config/data/.private/machinekey ]; then
+    CORE_MACHINEKEY="$(head -n 1 /config/data/.private/machinekey)"
+else
+    CORE_MACHINEKEY="${CORE_MACHINEKEY:-$(openssl rand -hex 16)}"
+    printf "%s\n" "${CORE_MACHINEKEY}" > /config/data/.private/machinekey
+fi
+
+if [ -z "${JWT_SECRET:-}" ]; then
+    if [ -f /config/data/.private/jwt_secret ]; then
+        JWT_SECRET="$(head -n 1 /config/data/.private/jwt_secret)"
+    else
+        JWT_SECRET="$(openssl rand -hex 16)"
+        printf "%s\n" "${JWT_SECRET}" > /config/data/.private/jwt_secret
+    fi
+fi
+
+# Sign release date with CORE_MACHINEKEY
+RELEASE_DATE="$(sed -n '/"version.number"/s!.*value=[[:space:]]*"\([^"]*\)".*!\1!p' "${WEBSTUDIO_DIR}/web.appsettings.config")"
+NOW="$(date +"%Y%m%d%H%M%S")"
+AUTHKEY="$(printf "%s\n%s" "${NOW}" "${RELEASE_DATE}" | openssl dgst -sha1 -binary -mac HMAC -macopt key:"${CORE_MACHINEKEY}" | base64)"
+RELEASE_DATE_SIGN="ASC ${RELEASE_DATE}:${NOW}:${AUTHKEY}"
+sed -i '' "/version.release-date.sign/s!value=\"[^\"]*\"!value=\"${RELEASE_DATE_SIGN}\"!g" "${WEBSTUDIO_DIR}/web.appsettings.config"
+
+# Propagate CORE_MACHINEKEY across WebStudio, ApiSystem, Services, and ControlPanel
+for _dir in "${WEBSTUDIO_DIR}" "${APISYSTEM_DIR}" "${SERVICES_DIR}" "${CONTROLPANEL_DIR}/config" "${CONFIG_DIR}"; do
+    if [ -d "${_dir}" ]; then
+        find "${_dir}" -type f \( -name "*.config" -o -name "*.Config" \) \
+            -exec sed -i '' "/core\.machinekey/s!\(value=[[:space:]]*\"\)[^\"]*\"!\1${CORE_MACHINEKEY}\"!" {} +
+        find "${_dir}" -type f -name "*.json" \
+            -exec sed -i '' "s!\(\"core\.machinekey\":[[:space:]]*\|\"machinekey\":[[:space:]]*\)\"[^\"]*\"!\1\"${CORE_MACHINEKEY}\"!" {} +
+    fi
+done
+
+# --- 3. Database connection strings ---
+CONN_STR="Server=${MYSQL_SERVER_HOST};Port=${MYSQL_SERVER_PORT};Database=${MYSQL_SERVER_DB_NAME};User ID=${MYSQL_SERVER_USER};Password=${MYSQL_SERVER_PASS};Pooling=true;Character Set=utf8;AutoEnlist=false;SSL Mode=none;AllowPublicKeyRetrieval=true;Connection Timeout=30;Maximum Pool Size=300;"
+
+for _dir in "${WEBSTUDIO_DIR}" "${APISYSTEM_DIR}" "${SERVICES_DIR}/TeamLabSvc"; do
+    find "${_dir}" -type f \( -name "*.config" -o -name "*.Config" \) \
+        -exec sed -i '' "s!connectionString=\"Server=[^\"]*\"!connectionString=\"${CONN_STR}\"!g" {} +
+done
+
+if [ -f "${CONFIG_DIR}/appsettings.production.json" ]; then
+    sed -i '' "s!Server=[^\"]*!${CONN_STR}!g" "${CONFIG_DIR}/appsettings.production.json"
+fi
+
+for _json in "${SERVICES_DIR}/ASC.UrlShortener/config/config.UNIX.SERVER.json" "${SERVICES_DIR}/ASC.WebDav/server/config/config.UNIX.SERVER.json"; do
+    if [ -f "${_json}" ]; then
+        jq --arg h "${MYSQL_SERVER_HOST}" \
+           --argjson p "${MYSQL_SERVER_PORT}" \
+           --arg u "${MYSQL_SERVER_USER}" \
+           --arg pw "${MYSQL_SERVER_PASS}" \
+           --arg db "${MYSQL_SERVER_DB_NAME}" \
+           'if .sql then .sql |= . + {host: $h, port: $p, user: $u, password: $pw, database: $db} else . end' \
+           "${_json}" > "${_json}.tmp" && mv "${_json}.tmp" "${_json}"
+    fi
+done
+
+# --- 4. Redis configuration ---
+for _cfg in "${WEBSTUDIO_DIR}/Web.config" "${SERVICES_DIR}/TeamLabSvc/TeamLabSvc.exe.config"; do
+    if [ -f "${_cfg}" ]; then
+        sed -i '' "s!<add[[:space:]]*host=\"[^\"]*\"[[:space:]]*cachePort=\"[0-9]*\"[[:space:]]*/>!<add host=\"${REDIS_SERVER_HOST}\" cachePort=\"${REDIS_SERVER_PORT}\" />!g" "${_cfg}"
+    fi
+done
+if [ -f "${SERVICES_DIR}/ASC.Socket.IO/config/config.UNIX.SERVER.json" ]; then
+    jq --arg h "${REDIS_SERVER_HOST}" --argjson p "${REDIS_SERVER_PORT}" --arg u "http://127.0.0.1:${HTTP_PORT}" \
+        '.["portal.internal.url"] = $u | .redis.host = $h | .redis.port = $p' \
+        "${SERVICES_DIR}/ASC.Socket.IO/config/config.UNIX.SERVER.json" > "${SERVICES_DIR}/ASC.Socket.IO/config/config.UNIX.SERVER.json.tmp" && \
+        mv "${SERVICES_DIR}/ASC.Socket.IO/config/config.UNIX.SERVER.json.tmp" "${SERVICES_DIR}/ASC.Socket.IO/config/config.UNIX.SERVER.json"
+fi
+
+# Disable ElasticSearch worker unless ELASTICSEARCH_SERVER_HOST is explicitly configured
+if [ -z "${ELASTICSEARCH_SERVER_HOST:-}" ]; then
+    sed -i '' '/ASC\.ElasticSearch/d' "${SERVICES_DIR}/TeamLabSvc/TeamLabSvc.exe.config"
+fi
+
+# Update internal portal ping URL to HTTP_PORT
+sed -i '' "/\"ping.url\"/s!value=\"[^\"]*\"!value=\"http://127.0.0.1:${HTTP_PORT}\"!" "${SERVICES_DIR}/TeamLabSvc/TeamLabSvc.exe.config"
+
+# --- 5. Bundled Control Panel configuration (127.0.0.1:9833) ---
+jq --arg portal "http://127.0.0.1:${HTTP_PORT}" --arg apisys "http://127.0.0.1:${HTTP_PORT}/apisystem/api" \
+    '.port = 9833 | .web.portal = $portal | .web.apiSystem = $apisys' \
+    "${CONTROLPANEL_DIR}/config/production.json" > "${CONTROLPANEL_DIR}/config/production.json.tmp" && \
+    mv "${CONTROLPANEL_DIR}/config/production.json.tmp" "${CONTROLPANEL_DIR}/config/production.json"
+
+cp /etc/nginx/includes/onlyoffice-communityserver-proxy-to-controlpanel.conf.template \
+   /etc/nginx/includes/onlyoffice-communityserver-proxy-to-controlpanel.conf
+sed -i '' 's/{{CONTROL_PANEL_HOST_ADDR}}/127.0.0.1:9833/g' \
+   /etc/nginx/includes/onlyoffice-communityserver-proxy-to-controlpanel.conf
+
+for _cfg in "${WEBSTUDIO_DIR}/web.appsettings.config" "${SERVICES_DIR}/TeamLabSvc/TeamLabSvc.exe.config"; do
+    sed -i '' '/"web\.controlpanel\.url"/s!value="[^"]*"!value="/controlpanel/"!' "${_cfg}"
+done
+
+# --- 6. Document Server integration ---
+if [ -n "${DOCUMENT_SERVER_HOST}" ]; then
+    case "${DOCUMENT_SERVER_HOST}" in
+        *:*) _ds_addr="${DOCUMENT_SERVER_HOST}" ;;
+        *)   _ds_addr="${DOCUMENT_SERVER_HOST}:${DOCUMENT_SERVER_PORT}" ;;
+    esac
+    echo "[onlyoffice-workspace] Wiring Document Server at ${DOCUMENT_SERVER_PROTOCOL}://${_ds_addr}..."
+    cp /etc/nginx/includes/onlyoffice-communityserver-proxy-to-documentserver.conf.template \
+       /etc/nginx/includes/onlyoffice-communityserver-proxy-to-documentserver.conf
+    sed -i '' "s!{{DOCUMENT_SERVER_HOST_ADDR}}!${DOCUMENT_SERVER_PROTOCOL}://${_ds_addr}!g" \
+       /etc/nginx/includes/onlyoffice-communityserver-proxy-to-documentserver.conf
+
+    for _cfg in "${WEBSTUDIO_DIR}/web.appsettings.config" "${SERVICES_DIR}/TeamLabSvc/TeamLabSvc.exe.config"; do
+        sed -i '' "/\"files\.docservice\.url\.internal\"/s!value=\"[^\"]*\"!value=\"${DOCUMENT_SERVER_PROTOCOL}://${_ds_addr}/\"!" "${_cfg}"
+        sed -i '' "/\"files\.docservice\.url\.public\"/s!value=\"[^\"]*\"!value=\"/ds-vpath/\"!" "${_cfg}"
+        sed -i '' "/\"files\.docservice\.url\.portal\"/s!value=\"[^\"]*\"!value=\"http://127.0.0.1:${HTTP_PORT}/\"!" "${_cfg}"
+        if [ "${JWT_ENABLED}" = "true" ]; then
+            sed -i '' "/\"files\.docservice\.secret\"/s!value=\"[^\"]*\"!value=\"${JWT_SECRET}\"!" "${_cfg}"
+            sed -i '' "/\"files\.docservice\.secret\.header\"/s!value=\"[^\"]*\"!value=\"${JWT_HEADER}\"!" "${_cfg}"
+        fi
+    done
+else
+    rm -f /etc/nginx/includes/onlyoffice-communityserver-proxy-to-documentserver.conf
+fi
+
+# --- 7. Nginx configuration ---
+cp -f /etc/nginx/includes/onlyoffice-communityserver-nginx.conf.template "${NGINX_CONF}"
+rm -f /etc/nginx/sites-enabled/onlyoffice
+cp /etc/nginx/sites-available/onlyoffice /etc/nginx/sites-enabled/onlyoffice
+sed -i '' 's/user[[:space:]]*nginx;/user bsd;/' "${NGINX_CONF}"
+sed -i '' "s/listen[[:space:]]*80;/listen ${HTTP_PORT};/" /etc/nginx/sites-enabled/onlyoffice
+# Radicale is not included; remove the /caldav/ and /carddav/ proxy blocks so they 404 instead of 502.
+sed -i '' '/^location \/caldav\/ {/,/^}/d; /^location \/carddav\/ {/,/^}/d' /etc/nginx/includes/onlyoffice-communityserver-services.conf
+
+# --- 8. Wait for MariaDB and initialize schema if empty ---
+echo "[onlyoffice-workspace] Waiting for MariaDB at ${MYSQL_SERVER_HOST}:${MYSQL_SERVER_PORT}..."
+_db_ready=false
+for _i in $(seq 1 60); do
+    if /usr/local/bin/mariadb-admin --ssl=0 -h "${MYSQL_SERVER_HOST}" -P "${MYSQL_SERVER_PORT}" \
+        -u "${MYSQL_SERVER_USER}" -p"${MYSQL_SERVER_PASS}" ping >/dev/null 2>&1; then
+        _db_ready=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "${_db_ready}" = "true" ]; then
+    if [ -n "${MYSQL_SERVER_ROOT_PASS:-}" ]; then
+        /usr/local/bin/mariadb --ssl=0 -h "${MYSQL_SERVER_HOST}" -P "${MYSQL_SERVER_PORT}" \
+            -u root -p"${MYSQL_SERVER_ROOT_PASS}" \
+            -e "SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'; SET GLOBAL max_allowed_packet = 1048576000; SET GLOBAL group_concat_max_len = 2048;"
+    else
+        echo "[onlyoffice-workspace] Using external MariaDB; ensure sql_mode=NO_ENGINE_SUBSTITUTION and max_allowed_packet=1G are set on ${MYSQL_SERVER_HOST}."
+    fi
+
+    _tables="$(/usr/local/bin/mariadb --ssl=0 -N -s -h "${MYSQL_SERVER_HOST}" -P "${MYSQL_SERVER_PORT}" \
+        -u "${MYSQL_SERVER_USER}" -p"${MYSQL_SERVER_PASS}" \
+        -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_SERVER_DB_NAME}';" 2>/dev/null || echo 0)"
+
+    if [ "${_tables}" = "0" ]; then
+        echo "[onlyoffice-workspace] Initializing database schema in ${MYSQL_SERVER_DB_NAME}..."
+        /usr/local/bin/mariadb --ssl=0 -h "${MYSQL_SERVER_HOST}" -P "${MYSQL_SERVER_PORT}" \
+            -u "${MYSQL_SERVER_USER}" -p"${MYSQL_SERVER_PASS}" "${MYSQL_SERVER_DB_NAME}" < "${APP_DIR}/Sql/onlyoffice.sql"
+        /usr/local/bin/mariadb --ssl=0 -h "${MYSQL_SERVER_HOST}" -P "${MYSQL_SERVER_PORT}" \
+            -u "${MYSQL_SERVER_USER}" -p"${MYSQL_SERVER_PASS}" "${MYSQL_SERVER_DB_NAME}" < "${APP_DIR}/Sql/onlyoffice.data.sql"
+        for _upg in "${APP_DIR}"/Sql/onlyoffice.upgrade*; do
+            [ -f "${_upg}" ] || continue
+            /usr/local/bin/mariadb --ssl=0 -h "${MYSQL_SERVER_HOST}" -P "${MYSQL_SERVER_PORT}" \
+                -u "${MYSQL_SERVER_USER}" -p"${MYSQL_SERVER_PASS}" "${MYSQL_SERVER_DB_NAME}" < "${_upg}"
+        done
+        echo "[onlyoffice-workspace] Database schema initialized."
+    else
+        echo "[onlyoffice-workspace] Database already contains ${_tables} tables, skipping init."
+    fi
+else
+    echo "[onlyoffice-workspace] WARNING: MariaDB not reachable after 60s, continuing startup."
+fi
+
+chown -R bsd:bsd /config /var/run/onlyoffice /var/cache/nginx /etc/onlyoffice /etc/hyperfastcgi \
+    /etc/nginx /etc/mono/registry "${APP_DIR}/.config"
+
+echo "[onlyoffice-workspace] Initialization complete."

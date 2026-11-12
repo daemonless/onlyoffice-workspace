@@ -1,0 +1,5 @@
+#!/bin/sh
+export NODE_ENV="production"
+export NODE_OPTIONS="--dns-result-order=ipv4first"
+cd /var/www/onlyoffice/controlpanel/www || exit 1
+exec dsu bsd /usr/local/bin/node /var/www/onlyoffice/controlpanel/www/server.js
