@@ -41,7 +41,7 @@ Before deploying, ensure your host environment is ready. See the [Quick Start Gu
 
 ### Podman Compose
 
-**Database.** Where ONLYOFFICE Workspace keeps its portal data. The default runs its own MariaDB.
+**Database.** Where ONLYOFFICE Workspace keeps its portal data. The default runs its own MariaDB. The document editors keep their editing state in a PostgreSQL of their own, which is always built in.
 
 **Document editors.** Online collaborative editors for Word, Excel and PowerPoint files inside Documents.
 

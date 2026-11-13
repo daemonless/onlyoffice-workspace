@@ -26,7 +26,7 @@ x-daemonless:
   choices:
     database:
       label: Database
-      doc: Where ONLYOFFICE Workspace keeps its portal data. The default runs its own MariaDB.
+      doc: Where ONLYOFFICE Workspace keeps its portal data. The default runs its own MariaDB. The document editors keep their editing state in a PostgreSQL of their own, which is always built in.
       default: builtin
       options:
         builtin:
