@@ -1,11 +1,11 @@
 {
-  "generated": "2026-11-12T22:23:38Z",
+  "generated": "2026-11-16T22:58:10Z",
   "image": "onlyoffice-workspace",
   "tags": {
     "latest": {
       "app_version": "12.8.0.1971",
       "arch": "amd64",
-      "generated": "2026-11-12T22:21:45Z",
+      "generated": "2026-11-16T22:56:17Z",
       "packages": {
         "dotnet": [],
         "freebsd": [
@@ -722,7 +722,7 @@
               "BSD2CLAUSE"
             ],
             "name": "pkg",
-            "version": "2.8.4"
+            "version": "2.9.2"
           },
           {
             "licenses": [
@@ -759,14 +759,14 @@
               "PSFL"
             ],
             "name": "py312-tkinter",
-            "version": "3.12.15_11"
+            "version": "3.12.16_11"
           },
           {
             "licenses": [
               "PSFL"
             ],
             "name": "python312",
-            "version": "3.12.15"
+            "version": "3.12.16"
           },
           {
             "licenses": [
@@ -3518,7 +3518,7 @@
           {
             "name": "tkinter",
             "purl": "",
-            "version": "3.12.15"
+            "version": "3.12.16"
           }
         ],
         "ruby": [],
