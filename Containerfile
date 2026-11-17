@@ -14,10 +14,10 @@ FROM ghcr.io/daemonless/base:${BASE_VERSION} AS builder
 # Upstream package versions and SHA256s come from ONLYOFFICE's APT index and Docker-CommunityServer:
 #   https://download.onlyoffice.com/repo/debian/dists/squeeze/main/binary-amd64/Packages
 #   https://github.com/ONLYOFFICE/Docker-CommunityServer/blob/master/Dockerfile
-ARG COMMUNITY_SERVER_VERSION="12.8.0.1971"
-ARG COMMUNITY_SERVER_SHA256="a1f25eb0b6b73a79c0dc20c4cdd19479ee2451e30435a42ef9fb5326cb8a51cc"
-ARG CONTROL_PANEL_VERSION="3.5.5.549"
-ARG CONTROL_PANEL_SHA256="6ca1cef1e46877a321afb1397d980666a6c4cfee7495d28a70c3045fde8a0c2d"
+ARG COMMUNITY_SERVER_VERSION="12.9.0.1980"
+ARG COMMUNITY_SERVER_SHA256="c0c880ac8c43928915fa3b08eeb9e818c3a58fc21814e03134841c20a9f4aa70"
+ARG CONTROL_PANEL_VERSION="3.6.0.552"
+ARG CONTROL_PANEL_SHA256="be02b7e19366a6d2d715ff2528e7c95c92f4472b5feb153dc0ceb6449e62d07b"
 ARG XMPP_SERVER_VERSION="12.0.0.134"
 ARG XMPP_SERVER_SHA256="a9795bab4dc79dd9a5b1319ab5aa231ab9fcf2e9a70770653b209249eb9c868e"
 ARG HYPERFASTCGI_DEB_VERSION="0.4-8"
@@ -33,7 +33,7 @@ RUN pkg update && \
         glib \
         libevent \
         pkgconf \
-        node20 && \
+        node24 && \
     pkg clean -ay && \
     rm -rf /var/cache/pkg/* /var/db/pkg/repos/*
 
@@ -96,8 +96,8 @@ RUN mkdir -p /tmp/debs /stage && \
 FROM ghcr.io/daemonless/nginx-base:${BASE_VERSION}
 
 ARG FREEBSD_ARCH=amd64
-ARG COMMUNITY_SERVER_VERSION="12.8.0.1971"
-ARG PACKAGES="mono6.8 glib libevent mariadb114-client redis node20 jq bash"
+ARG COMMUNITY_SERVER_VERSION="12.9.0.1980"
+ARG PACKAGES="mono6.8 glib libevent mariadb114-client redis node24 jq bash"
 ARG UPSTREAM_URL="https://api.github.com/repos/ONLYOFFICE/CommunityServer/tags"
 ARG UPSTREAM_JQ='.[0].name | ltrimstr("v")'
 ARG HEALTHCHECK_ENDPOINT="http://localhost:8080/api/2.0/capabilities.json"
